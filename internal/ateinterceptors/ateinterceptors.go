@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"runtime/debug"
 	"strconv"
 	"time"
 
@@ -82,6 +83,39 @@ func MaxDeadlineUnaryInterceptor(maxDeadline time.Duration) grpc.UnaryServerInte
 		defer cancel()
 		return handler(ctx, req)
 	}
+}
+
+// RecoveryUnaryInterceptor turns a panic in an RPC handler into a codes.Internal
+// error instead of letting it take the process down.
+//
+// grpc-go serves every RPC on its own goroutine and does not recover handler
+// panics, and the Go runtime kills the whole process on an unrecovered panic in
+// any goroutine. Without this, a nil dereference in one handler ends every other
+// RPC the server is serving: on an ateom, a bug in a stats read would abort an
+// in-flight checkpoint and drop the worker's socket.
+//
+// Chain it outermost, so it also covers the interceptors beneath it. The panic
+// value and stack go to the log; the caller gets a bare Internal, because a
+// panic message can quote request data.
+func RecoveryUnaryInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		slog.ErrorContext(ctx, "Recovered panic in RPC handler",
+			slog.String("method", info.FullMethod),
+			slog.Any("panic", r),
+			slog.String("stack", string(debug.Stack())),
+		)
+		// resp is already nil, since the return assignment below never ran. Set
+		// explicitly so this stays right if the body ever grows an assignment
+		// before the handler call.
+		resp = nil
+		err = status.Errorf(codes.Internal, "internal server error handling %s", info.FullMethod)
+	}()
+
+	return handler(ctx, req)
 }
 
 // InternalServerUnaryInterceptor is for internal services to return full gRPC errors with specific error codes and debugging details.

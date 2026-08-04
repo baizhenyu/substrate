@@ -326,3 +326,84 @@ func TestServerUnaryInterceptorRedactsEnvFromProtoRequestLogs(t *testing.T) {
 		t.Fatalf("interceptor mutated original request")
 	}
 }
+
+// TestRecoveryUnaryInterceptorRecoversPanic is the point of the interceptor:
+// without it, this panic would unwind out of the goroutine grpc-go serves the
+// RPC on and take the whole process down. If the recover ever regresses, this
+// test does not fail — the test binary crashes.
+func TestRecoveryUnaryInterceptorRecoversPanic(t *testing.T) {
+	var log bytes.Buffer
+	origLogger := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(origLogger) })
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&log, nil)))
+
+	const method = "/ateom.Ateom/GetWorkloadStats"
+	resp, err := RecoveryUnaryInterceptor(context.Background(), &ateletpb.RunRequest{}, &grpc.UnaryServerInfo{FullMethod: method},
+		func(ctx context.Context, req any) (any, error) {
+			var attribution *struct{ UID string }
+			// The shape the stats handlers are prone to: the "no workload here"
+			// state is a nil pointer, so any read that skips the nil check panics.
+			return attribution.UID, nil
+		})
+
+	if resp != nil {
+		t.Errorf("RecoveryUnaryInterceptor() resp = %v, want nil", resp)
+	}
+	if got := status.Code(err); got != codes.Internal {
+		t.Errorf("RecoveryUnaryInterceptor() code = %v, want %v (err: %v)", got, codes.Internal, err)
+	}
+	if got := status.Convert(err).Message(); !strings.Contains(got, method) {
+		t.Errorf("RecoveryUnaryInterceptor() message = %q, want it to name %q", got, method)
+	}
+	// The panic text can quote request data, so it belongs in the log and not in
+	// the response.
+	if got := status.Convert(err).Message(); strings.Contains(got, "nil pointer") {
+		t.Errorf("RecoveryUnaryInterceptor() message = %q, want no panic detail", got)
+	}
+
+	gotLog := log.String()
+	if !strings.Contains(gotLog, "nil pointer dereference") {
+		t.Errorf("log does not record the panic value: %s", gotLog)
+	}
+	if !strings.Contains(gotLog, "RecoveryUnaryInterceptor") {
+		t.Errorf("log does not record a stack: %s", gotLog)
+	}
+}
+
+// TestRecoveryUnaryInterceptorPassesThrough checks the interceptor is invisible
+// on every path that does not panic — it sits in front of every RPC on both
+// ateoms, so it must not reshape ordinary responses or errors.
+func TestRecoveryUnaryInterceptorPassesThrough(t *testing.T) {
+	wantResp := &ateletpb.RunResponse{}
+
+	for _, tc := range []struct {
+		name       string
+		handlerErr error
+		wantResp   any
+		wantCode   codes.Code
+	}{
+		{name: "success", handlerErr: nil, wantResp: wantResp, wantCode: codes.OK},
+		{name: "status error", handlerErr: status.Error(codes.NotFound, "actor not found"), wantCode: codes.NotFound},
+		{name: "plain error", handlerErr: errors.New("boom"), wantCode: codes.Unknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := RecoveryUnaryInterceptor(context.Background(), &ateletpb.RunRequest{}, &grpc.UnaryServerInfo{FullMethod: "/atelet.AteomHerder/Run"},
+				func(ctx context.Context, req any) (any, error) {
+					if tc.handlerErr != nil {
+						return nil, tc.handlerErr
+					}
+					return wantResp, nil
+				})
+
+			if resp != tc.wantResp {
+				t.Errorf("RecoveryUnaryInterceptor() resp = %v, want %v", resp, tc.wantResp)
+			}
+			if got := status.Code(err); got != tc.wantCode {
+				t.Errorf("RecoveryUnaryInterceptor() code = %v, want %v (err: %v)", got, tc.wantCode, err)
+			}
+			if tc.handlerErr != nil && !errors.Is(err, tc.handlerErr) {
+				t.Errorf("RecoveryUnaryInterceptor() err = %v, want the handler's own error unwrapped", err)
+			}
+		})
+	}
+}

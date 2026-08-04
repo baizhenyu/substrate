@@ -212,7 +212,12 @@ func do(ctx context.Context) error {
 
 	svr := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
-		grpc.UnaryInterceptor(ateinterceptors.InternalServerUnaryInterceptor),
+		// Recovery first, so a panic anywhere below it fails one RPC rather than
+		// killing the ateom and every workload it is shepherding.
+		grpc.ChainUnaryInterceptor(
+			ateinterceptors.RecoveryUnaryInterceptor,
+			ateinterceptors.InternalServerUnaryInterceptor,
+		),
 	)
 	ateompb.RegisterAteomServer(svr, NewService(*podUID, *chBinary, *kataConfig, *kataDebug, interiorNetNS, actorLogger, atunnelServer, atunnelEgress, atunnelEgressPort, *atunnelCredentialBundle, *atunnelEgressTrustBundle))
 	reflection.Register(svr)

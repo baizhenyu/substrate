@@ -1059,8 +1059,14 @@ type GetWorkloadStatsResponse struct {
 	Source StatsSource `protobuf:"varint,7,opt,name=source,proto3,enum=ateom.StatsSource" json:"source,omitempty"`
 	// Measurements. All four are zero when source is STATS_SOURCE_UNSPECIFIED,
 	// which means "not measured" rather than "measured as zero".
-	MemoryCurrentBytes    uint64 `protobuf:"varint,8,opt,name=memory_current_bytes,json=memoryCurrentBytes,proto3" json:"memory_current_bytes,omitempty"`
-	MemoryPeakBytes       uint64 `protobuf:"varint,9,opt,name=memory_peak_bytes,json=memoryPeakBytes,proto3" json:"memory_peak_bytes,omitempty"`
+	MemoryCurrentBytes uint64 `protobuf:"varint,8,opt,name=memory_current_bytes,json=memoryCurrentBytes,proto3" json:"memory_current_bytes,omitempty"`
+	// High-water mark of memory_current_bytes. Also zero when the runtime cannot
+	// report a peak at all: the cgroup source reads memory.peak, which only
+	// exists on Linux 5.19 and later.
+	MemoryPeakBytes uint64 `protobuf:"varint,9,opt,name=memory_peak_bytes,json=memoryPeakBytes,proto3" json:"memory_peak_bytes,omitempty"`
+	// memory_current_bytes less the reclaimable page cache, floored at zero. This
+	// is the figure to compare against a memory limit; memory_current_bytes
+	// drifts upward with cache the kernel would drop for free under pressure.
 	MemoryWorkingSetBytes uint64 `protobuf:"varint,10,opt,name=memory_working_set_bytes,json=memoryWorkingSetBytes,proto3" json:"memory_working_set_bytes,omitempty"`
 	// Cumulative CPU time within the current epoch. A restore starts a new epoch:
 	// the sandbox is recreated, so this restarts at zero and callers computing
