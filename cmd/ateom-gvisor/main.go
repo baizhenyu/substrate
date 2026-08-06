@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"cloud.google.com/go/compute/metadata"
 	"github.com/agent-substrate/substrate/internal/actorlog"
@@ -250,13 +251,27 @@ type AteomService struct {
 	// activeActor is the actor whose workload this ateom is currently running,
 	// or nil when it is "available". An ateom serves one actor at a time, so a
 	// single slot is enough (the micro-VM ateom holds the same field, set and
-	// cleared at the same points). Guarded by lock, like every other
-	// RPC-visible field.
+	// cleared at the same points).
 	//
 	// Set by RunWorkload / RestoreWorkload and cleared by CheckpointWorkload, so
 	// it tracks exactly the available/executing state machine described on the
 	// Ateom service. GetWorkloadStats reads it to attribute its sample.
-	activeActor *ateomstats.ActorAttribution
+	//
+	// Atomic rather than guarded by lock, unlike every other RPC-visible field
+	// here. The three writers already hold lock for their whole bodies and keep
+	// doing so; the point is the reader. lock is held across an entire boot,
+	// restore, or checkpoint, so a lock-guarded read would park a poller for the
+	// full duration of each -- going quiet during exactly the phases whose usage
+	// is most interesting -- and holding it across the read would put a
+	// CheckpointWorkload behind telemetry instead. The field is only ever
+	// assigned or cleared as a whole pointer, never mutated in place, which is
+	// exactly what atomic.Pointer is for.
+	//
+	// The type makes a lock-free read possible; it does not make one happen.
+	// GetWorkloadStats must not take lock at all, including around whatever it
+	// does with the value. A regression test pins that once there is a handler
+	// with a body to pin.
+	activeActor atomic.Pointer[ateomstats.ActorAttribution]
 }
 
 var _ ateompb.AteomServer = (*AteomService)(nil)
@@ -288,7 +303,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	// taken against a workload that dies mid-boot is still attributable. The
 	// cleanup below drops it again if the boot fails outright.
 	attribution := ateomstats.ActorAttributionFromRequest(req)
-	s.activeActor = &attribution
+	s.activeActor.Store(&attribution)
 
 	// Contract with atelet:
 	//
@@ -302,12 +317,12 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	}); err != nil {
 		// Cleared here as well as in the deferred cleanup below, because that
 		// defer is not registered until after this check.
-		s.activeActor = nil
+		s.activeActor.Store(nil)
 		return nil, fmt.Errorf("while setting up actor network: %w", err)
 	}
 	defer func() {
 		if retErr != nil {
-			s.activeActor = nil
+			s.activeActor.Store(nil)
 			// Detach any bundle rootfs overlays a partially-completed setup
 			// mounted, mirroring the post-checkpoint cleanup — otherwise they
 			// linger in this namespace until atelet wipes the bundle dirs.
@@ -435,7 +450,7 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	// attribution behind. Conversely nothing above this point clears it: a
 	// checkpoint that failed may well have left the workload running, and
 	// reporting its usage is then the honest answer.
-	s.activeActor = nil
+	s.activeActor.Store(nil)
 
 	// After checkpointing the sandbox root, runsc may no longer have a usable
 	// control server for state/delete calls. Keep this as best-effort cleanup:
@@ -539,7 +554,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 
 	// Same as RunWorkload: retain before the boot, drop again if it fails.
 	attribution := ateomstats.ActorAttributionFromRequest(req)
-	s.activeActor = &attribution
+	s.activeActor.Store(&attribution)
 
 	// Contract with atelet:
 	//
@@ -553,12 +568,12 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		EgressRedirectPort: s.egressRedirectPort(req.GetEgressGatewayAddress() != ""),
 	}); err != nil {
 		// Same as the Run path: the defer below is not registered yet.
-		s.activeActor = nil
+		s.activeActor.Store(nil)
 		return nil, fmt.Errorf("while setting up actor network: %w", err)
 	}
 	defer func() {
 		if retErr != nil {
-			s.activeActor = nil
+			s.activeActor.Store(nil)
 			// Same overlay detach as the Run-failure path above.
 			if err := imagecache.UnmountAllUnder(ateompath.OCIBundleDir(req.GetActorUid())); err != nil {
 				slog.WarnContext(ctx, "Failed to unmount bundle rootfs overlays after Restore failure",
