@@ -216,6 +216,9 @@ func main() {
 	if *imageCacheGCPeriod > 0 {
 		go newImageCacheGC(imageCache, *imageCacheDir).Run(ctx)
 	}
+	if err := validateAteomGCFlags(); err != nil {
+		serverboot.Fatal(ctx, "Invalid ateom GC flags", err)
+	}
 
 	wrappedAnonGCS, err := ategcs.NewGCSClient(ctx, option.WithoutAuthentication())
 	if err != nil {
@@ -250,6 +253,15 @@ func main() {
 	k8sClient, ateClient, err := newKubeClients()
 	if err != nil {
 		serverboot.Fatal(ctx, "Failed to create Kubernetes clients", err)
+	}
+
+	if *ateomGCPeriod > 0 {
+		// The janitor needs the node's pod list, and so the node name.
+		if nodeName := os.Getenv("NODE_NAME"); nodeName != "" {
+			go newAteomGC(k8sClient, nodeName).Run(ctx)
+		} else {
+			slog.WarnContext(ctx, "NODE_NAME not set; the ateom directory janitor is disabled")
+		}
 	}
 
 	if interval := clampActorStatsPollInterval(ctx, *actorStatsPollInterval); interval > 0 {
