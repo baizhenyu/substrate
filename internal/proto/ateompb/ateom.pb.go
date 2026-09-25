@@ -1700,9 +1700,8 @@ type GetActiveWorkloadStatsResponse struct {
 	// the rpc); an entry with source = STATS_SOURCE_UNSPECIFIED is a workload
 	// with no numbers to give yet (boot, restore, teardown, or a lifecycle
 	// transition underneath the read) -- skip its measurements and take the
-	// next sample. An ateom serves one actor at a time today, so the list holds
-	// at most one entry until multi-actor workers land; consumers must not
-	// assume that.
+	// next sample. An ateom may host several actors, so the list has one entry
+	// per actor it hosts; consumers must fold every entry.
 	Samples       []*WorkloadStatsSample `protobuf:"bytes,1,rep,name=samples,proto3" json:"samples,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
